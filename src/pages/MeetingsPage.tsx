@@ -303,11 +303,13 @@ function UploadRecordingModal({ open, onClose, onCompleted }: { open: boolean; o
 
   const stageSteps: { key: ProcessingState['stage']; label: string }[] = [
     { key: 'uploading', label: 'Uploading recording' },
-    { key: 'transcribing', label: 'Generating transcript' },
+    { key: 'uploaded', label: 'Saved to storage' },
+    { key: 'transcribing', label: 'Local transcription' },
+    { key: 'transcribed', label: 'Transcript ready' },
     { key: 'analyzing', label: 'Analyzing meeting' },
     { key: 'completed', label: 'Completed' },
   ];
-  const stageOrder = ['idle', 'uploading', 'transcribing', 'analyzing', 'completed', 'error'];
+  const stageOrder = ['idle', 'uploading', 'uploaded', 'transcribing', 'transcribed', 'analyzing', 'completed', 'error'];
   const currentIdx = stageOrder.indexOf(processState.stage);
 
   return (
@@ -334,6 +336,7 @@ function UploadRecordingModal({ open, onClose, onCompleted }: { open: boolean; o
               >
                 <Upload className="w-10 h-10 text-slate-300 mx-auto mb-3" />
                 <p className="text-sm text-slate-500 mb-2">Drag and drop a recording here, or</p>
+                <p className="text-xs text-slate-500 mb-3">Free local transcription uses Faster-Whisper on your computer. No OpenAI credits are required.</p>
                 <label className="inline-block">
                   <input
                     type="file"

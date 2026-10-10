@@ -28,7 +28,9 @@ export function validateRecordingFile(file: File): string | null {
 export type ProcessingStage =
   | 'idle'
   | 'uploading'
+  | 'uploaded'
   | 'transcribing'
+  | 'transcribed'
   | 'analyzing'
   | 'completed'
   | 'error';
@@ -44,12 +46,14 @@ export async function uploadRecordingAndGetTranscript(
   file: File,
   onStateChange: (state: ProcessingState) => void,
 ): Promise<void> {
-  onStateChange({ stage: 'uploading', message: 'Uploading recording...', progress: 10 });
+  const fileError = validateRecordingFile(file);
+  if (fileError) throw new Error(fileError);
+
+  onStateChange({ stage: 'uploading', message: 'Uploading recording to secure storage...', progress: 10 });
 
   const { data: { user }, error: userError } = await supabase.auth.getUser();
   if (userError || !user) throw new Error('You must be signed in to upload a recording.');
 
-  const ext = file.name.split('.').pop()?.toLowerCase() || 'audio';
   const safeName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
   const storagePath = `${user.id}/${safeName}`;
 
@@ -63,58 +67,76 @@ export async function uploadRecordingAndGetTranscript(
     throw new Error(`Upload failed: ${uploadError.message}`);
   }
 
-  onStateChange({ stage: 'transcribing', message: 'Generating transcript from audio...', progress: 40 });
+  onStateChange({ stage: 'uploaded', message: 'Recording saved securely. Running local transcription...', progress: 30 });
 
-  const { data: sessionData } = await supabase.auth.getSession();
-  const accessToken = sessionData.session?.access_token;
-  if (!accessToken) throw new Error('Your session has expired. Please sign in again.');
+  const localTranscriptionUrl = (import.meta.env.VITE_LOCAL_TRANSCRIPTION_URL || 'http://localhost:8000').replace(/\/$/, '');
+  const formData = new FormData();
+  formData.append('file', file, file.name);
 
-  const functionUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/transcribe-meeting`;
-  const response = await fetch(functionUrl, {
+  onStateChange({ stage: 'transcribing', message: 'Running local Faster-Whisper transcription...', progress: 50 });
+
+  const response = await fetch(`${localTranscriptionUrl}/api/transcribe/local`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-    },
-    body: JSON.stringify({
-      meetingId,
-      storagePath,
-      fileName: file.name,
-      mimeType: file.type,
-    }),
+    body: formData,
   });
 
   if (!response.ok) {
-    let message = 'Transcription failed. Please try again.';
+    let message = 'Local speech-to-text failed. Please try another audio file or check the Python backend status.';
     try {
-      const body = await response.json() as { error?: string };
-      if (body.error) message = body.error;
-    } catch { /* use default */ }
+      const body = await response.json() as { detail?: string; error?: string };
+      if (body.detail) message = body.detail;
+      else if (body.error) message = body.error;
+    } catch { /* fall back to default */ }
     throw new Error(message);
   }
 
   const result = await response.json() as {
-    transcript: { full_text: string; segments: TranscriptSegment[]; language: string };
+    full_text?: string;
+    segments?: TranscriptSegment[];
+    language?: string;
   };
 
-  onStateChange({ stage: 'analyzing', message: 'Analyzing meeting with AI...', progress: 70 });
+  if (!result.full_text?.trim()) {
+    throw new Error('The recording was processed but no transcript text was returned.');
+  }
 
-  const { data: meeting } = await supabase
+  const transcriptText = result.full_text.trim();
+  const transcriptSegments = (result.segments || []).map((segment) => ({
+    speaker: segment.speaker || 'Speaker',
+    text: String(segment.text || '').trim(),
+    start: Number(segment.start || 0),
+    end: Number(segment.end || 0),
+  })).filter((segment) => segment.text.length > 0);
+
+  const { data: meetingRecord, error: meetingLookupError } = await supabase
     .from('meetings')
-    .select('*')
+    .select('title, participants, duration_minutes')
     .eq('id', meetingId)
     .maybeSingle();
-  if (!meeting) throw new Error('Meeting not found.');
+
+  if (meetingLookupError || !meetingRecord) {
+    throw new Error('The meeting record could not be loaded for analysis.');
+  }
+
+  await saveTranscript(meetingId, transcriptText, transcriptSegments);
+
+  await supabase.from('meetings').update({
+    recording_url: storagePath,
+    status: 'completed',
+    updated_at: new Date().toISOString(),
+  }).eq('id', meetingId);
+
+  onStateChange({ stage: 'transcribed', message: 'Transcript saved. Generating summary and action items...', progress: 75 });
 
   await analyzeAndStoreMeeting(
     meetingId,
-    result.transcript.segments,
-    (meeting as Meeting).title,
-    (meeting as Meeting).participants || [],
-    (meeting as Meeting).duration_minutes || 60,
+    transcriptSegments,
+    meetingRecord.title,
+    meetingRecord.participants || [],
+    meetingRecord.duration_minutes || 60,
   );
 
+  onStateChange({ stage: 'analyzing', message: 'Local analysis complete. Loading meeting results...', progress: 90 });
   onStateChange({ stage: 'completed', message: 'Meeting analysis complete!', progress: 100 });
 }
 

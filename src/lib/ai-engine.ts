@@ -109,7 +109,7 @@ function detectOwner(text: string, participants: string[]): string {
 }
 
 function isActionSentence(sentence: string): boolean {
-  return ACTION_PATTERNS.some(([, pattern]) => pattern.test(sentence));
+  return ACTION_PATTERNS.some((pattern) => pattern.test(sentence));
 }
 
 function splitSentences(text: string): string[] {
